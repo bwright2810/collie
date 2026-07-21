@@ -6,6 +6,11 @@ All notable changes to Collie are recorded here. The format follows
 `version` in `herdr-plugin.toml`, `package.json`, and `web/package.json` (enforced by
 `scripts/check-version.sh`). See [`CLAUDE.md`](./CLAUDE.md) → *Versioning* for the bump policy.
 
+## [0.14.1] - 2026-07-21
+
+### Fixed
+- Windows transport: HerdrClient spawns the `herdr` CLI per RPC instead of opening the socket directly — Herdr's Windows named pipe isn't reachable via `Bun.connect({unix})` (6990540)
+
 ## [0.14.0] - 2026-07-21
 
 ### Added
