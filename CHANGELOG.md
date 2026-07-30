@@ -6,6 +6,13 @@ All notable changes to Collie are recorded here. The format follows
 `version` in `herdr-plugin.toml`, `package.json`, and `web/package.json` (enforced by
 `scripts/check-version.sh`). See [`CLAUDE.md`](./CLAUDE.md) → *Versioning* for the bump policy.
 
+## [0.19.0] - 2026-07-30
+
+### Added
+- **Answer a local dcg destructive-command block from the phone.** The guard hook publishes each block to `~/.config/dcg/pending`; `GET /api/dcg/pending` lists them and `POST /api/dcg/:id/answer` decides one. The desk dialog and the phone race — an exclusive-create lock file guarantees a single winner, so a block can never be denied at the desk and allowed remotely. (2e85305)
+- **Approval cards on the dashboard, with all four guard actions.** Deny / allow once, plus always-allow-this-rule and always-allow-this-exact-command behind a disclosure carrying a project-or-everywhere scope. A countdown retires a card when the guard's window closes. (2e85305)
+- **Push on a new block**, on its own collapse topic so it never overwrites the herd summary; gated by the existing `blocked` notify pref, and a tap opens the dashboard. (2e85305)
+
 ## [0.18.0] - 2026-07-28
 
 ### Added
