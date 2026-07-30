@@ -250,6 +250,34 @@ export interface NotifyPrefs {
   updates: boolean;
 }
 
+/** What may be answered for a dcg block. Mirrors DcgAction in bridge/dcg-approvals.ts. */
+export type DcgAction = "deny" | "once" | "rule" | "command";
+/** Where an "always allow" is persisted: this project only, or globally. */
+export type DcgScope = "project" | "user";
+
+/**
+ * A destructive command the local dcg guard has blocked, awaiting a human decision. Published by the
+ * guard hook and answerable either at the desk (a native dialog) or from here — whichever answers
+ * first wins. Mirrors DcgPending in bridge/dcg-approvals.ts.
+ */
+export interface DcgPending {
+  id: string;
+  /** The dcg rule that fired, e.g. "core.filesystem:rm-rf-general". */
+  ruleId: string;
+  command: string;
+  cwd?: string;
+  /** The guard's own explanation of why this is destructive. */
+  reason?: string;
+  createdAt: string;
+  /** After this the guard auto-denies, so the UI stops offering it. */
+  expiresAt: string;
+  host?: string;
+}
+
+export interface DcgPendingResponse {
+  pending: DcgPending[];
+}
+
 /** Lower sorts first — "needs you" at the top. Mirrors STATUS_RANK on the server. */
 export const STATUS_RANK: Record<AgentStatus, number> = {
   blocked: 0,

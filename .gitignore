@@ -39,6 +39,10 @@ Thumbs.db
 .claude/
 .tracker/
 
+# Bridge runtime state (COLLIE_STATE_DIR when co-located with the checkout, as on Windows).
+# Holds live push subscriptions and the audit log — device credentials and activity, never committed.
+.state/
+
 # Bug-repro screenshots — evidence for a fix, not documentation. Keep them local;
 # the fix commit and its CHANGELOG line are the durable record.
 .screenshot-bugs/

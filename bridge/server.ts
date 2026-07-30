@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { extname, join, normalize, sep } from "node:path";
 import type { AuditLog } from "./audit.ts";
 import type { Config } from "./config.ts";
+import { DcgApprovals, parseAnswerBody } from "./dcg-approvals.ts";
 import type { HerdrClient, PaneRead } from "./herdr-client.ts";
 import { computeEtag, gzipJsonResponse, notModified } from "./http-cache.ts";
 import type { NotifyPrefs, NotifyPrefsStore } from "./notify-prefs.ts";
@@ -112,6 +113,9 @@ export function startServer(opts: {
   const transcripts = cfg.transcript
     ? new TranscriptStore(new ClaudeTranscriptSource(cfg.transcriptRoot))
     : null;
+  // Blocks published by the local dcg guard. Independent of herdr: the guard writes files whether or
+  // not this bridge is up, so nothing here needs to exist for the desk dialog to keep working.
+  const dcgApprovals = new DcgApprovals();
   // Per-session background notifications live in each session's runtime (built by the factory in
   // index.ts, wired to its StateEngine transitions). The routes here only fan preference changes and
   // snooze-clears across every live session's coordinator.
@@ -250,6 +254,53 @@ export function startServer(opts: {
         if (!isPushSubscription(body)) return text("bad subscription", 400);
         await push.addSubscription(body);
         return secure(new Response(null, { status: 204 }));
+      }
+      // ── dcg approvals (answer a destructive-command block from the phone) ──
+      if (pathname === "/api/dcg/pending") {
+        // Read-level: listing what is blocked reveals a command line, no more than the pane read
+        // this bridge already serves.
+        const denied = guard(req, cfg, "read");
+        if (denied) return denied;
+        return json(
+          { pending: await dcgApprovals.listPending() },
+          req.headers.get("accept-encoding"),
+        );
+      }
+      if (pathname.startsWith("/api/dcg/") && pathname.endsWith("/answer") && req.method === "POST") {
+        // WRITE-level, and deliberately the strictest thing here: approving a dcg block runs a
+        // command the local guard already judged destructive. Strictly more powerful than driving a
+        // terminal, so it demands an authorised device, not merely tailnet access.
+        const denied = guard(req, cfg, "write");
+        if (denied) return denied;
+        const id = pathname.slice("/api/dcg/".length, -"/answer".length);
+        let body: unknown;
+        try {
+          body = await req.json();
+        } catch {
+          return text("bad answer", 400);
+        }
+        const parsed = parseAnswerBody(body);
+        if (!parsed.ok) return text("bad answer", 400);
+
+        const device = deviceAuth(req, cfg).device;
+        const res = await dcgApprovals.answer(id, parsed.action, parsed.scope, device);
+        if (!res.ok) {
+          const status = res.reason === "claimed" ? 409 : res.reason === "expired" ? 410 : 404;
+          return json(
+            { ok: false, error: res.reason },
+            req.headers.get("accept-encoding"),
+            status,
+          );
+        }
+        // Audited like every other state-changing action, so an approval that came from a phone is
+        // attributable after the fact.
+        audit.record({
+          action: "dcg.answer",
+          session: "-",
+          device,
+          detail: { id, dcgAction: parsed.action, scope: parsed.scope },
+        });
+        return json({ ok: true }, req.headers.get("accept-encoding"));
       }
       if (pathname === "/api/notifications/snooze" && req.method === "POST") {
         // Managing your own notification quiet-hours isn't terminal-driving — read-level, like subscribe.

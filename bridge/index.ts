@@ -9,6 +9,7 @@ import { DEFAULT_TIMEOUT_MS, HerdrClient } from "./herdr-client.ts";
 import { NotificationCoordinator, makeNotifySink, type NotifyClock } from "./notifications.ts";
 import { NotifyPrefsStore } from "./notify-prefs.ts";
 import { Push } from "./push.ts";
+import { DcgApprovals, DcgWatcher } from "./dcg-approvals.ts";
 import { startServer } from "./server.ts";
 import {
   deriveConfigRoot,
@@ -91,6 +92,32 @@ const updateMonitor = new UpdateMonitor({
       target: "settings",
     }),
 });
+
+// Blocked destructive commands from the local dcg guard. Polled on a short interval because the guard
+// auto-denies in minutes — a late alert is a useless one. Rides the `blocked` notify pref: this is the
+// same "something needs your input" class of alert, and it must respect the same off-switch.
+const dcgApprovals = new DcgApprovals();
+const dcgWatcher = new DcgWatcher(
+  dcgApprovals,
+  (pending) =>
+    void push.send({
+      type: "dcg",
+      tag: "collie:dcg",
+      title: "Approve destructive command?",
+      // The rule, not the command: a lock-screen preview is the wrong place for a full command line,
+      // and the card shows it verbatim once unlocked.
+      body: pending.ruleId,
+      target: "home",
+      renotify: true,
+    }),
+  () => notifyPrefs.current().blocked,
+);
+const dcgTimer = setInterval(() => void dcgWatcher.poll(), 3_000);
+dcgTimer.unref();
+// Sweep artifacts a killed hook could not clean up (machine sleep, session end), so a stale request
+// is never offered for approval.
+const dcgPruneTimer = setInterval(() => void dcgApprovals.pruneExpired(), 300_000);
+dcgPruneTimer.unref();
 
 // First check delayed (don't probe mid-boot); then every few hours. unref() so neither timer holds
 // the process open; both cleared on shutdown.

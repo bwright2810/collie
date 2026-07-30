@@ -8,6 +8,10 @@ import type {
   ActionResponse,
   BridgeConfig,
   CreateResponse,
+  DcgAction,
+  DcgPending,
+  DcgPendingResponse,
+  DcgScope,
   NotifyPrefs,
   PaneHistoryResponse,
   PaneReadResponse,
@@ -16,7 +20,7 @@ import type {
   UploadResponse,
 } from "./types";
 
-export type { NotifyPrefs, UpdateInfo };
+export type { DcgAction, DcgPending, DcgScope, NotifyPrefs, UpdateInfo };
 
 class ApiError extends Error {
   readonly status: number;
@@ -372,6 +376,27 @@ export function setSnooze(snoozedUntil: number | null): Promise<{ snoozedUntil: 
   return req<{ snoozedUntil: number | null }>("/api/notifications/snooze", {
     method: "POST",
     body: JSON.stringify({ snoozedUntil }),
+  });
+}
+
+/** Destructive-command blocks awaiting a decision. Empty is the normal case. */
+export async function getDcgPending(signal?: AbortSignal): Promise<DcgPending[]> {
+  const res = await req<DcgPendingResponse>("/api/dcg/pending", signal ? { signal } : undefined);
+  return res.pending;
+}
+
+/**
+ * Decide one blocked command. Write-level on the bridge — strictly more powerful than driving a
+ * terminal, since it runs something the guard already judged destructive.
+ *
+ * The desk dialog is racing this call, so a rejection is expected and not an error to retry: 409
+ * means the desk (or another device) answered first, 410 that the guard already timed out and
+ * auto-denied. Callers should refresh rather than surface those as failures.
+ */
+export function answerDcg(id: string, action: DcgAction, scope: DcgScope): Promise<{ ok: boolean }> {
+  return req<{ ok: boolean }>(`/api/dcg/${encodeURIComponent(id)}/answer`, {
+    method: "POST",
+    body: JSON.stringify({ action, scope }),
   });
 }
 

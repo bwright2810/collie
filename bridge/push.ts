@@ -22,6 +22,10 @@ const SEND_OPTIONS = { TTL: 21_600, topic: "collie-herd" } as const;
 // device's queued herd summary and an update push silently overwrite each other. 3-day TTL, since an
 // update stays relevant far longer than a transient "needs you".
 const UPDATE_SEND_OPTIONS = { TTL: 259_200, topic: "collie-update" } as const;
+// A blocked destructive command is the shortest-lived alert here: the guard auto-denies in minutes,
+// so a queued copy arriving after that would invite a tap on a decision that can no longer land.
+// Its own collapse topic, so it never overwrites (or is overwritten by) the herd summary.
+const DCG_SEND_OPTIONS = { TTL: 300, topic: "collie-dcg" } as const;
 
 /** web-push delivery options (collapse topic + TTL), derived per message from its `type`. */
 export type SendOptions = { TTL: number; topic: string };
@@ -41,7 +45,7 @@ export type PushSender = (
  * deep-links to `paneId` on tap, and re-alerts when `renotify` is set.
  */
 export interface PushMessage {
-  type?: "clear" | "update";
+  type?: "clear" | "update" | "dcg";
   title?: string;
   body?: string;
   /** Notification slot. Same tag replaces (rather than stacks) the previous notification. */
@@ -53,9 +57,10 @@ export interface PushMessage {
    * then stays byte-identical to the single-session case (an older cached SW keeps working).
    */
   session?: string;
-  /** Where a tap should land instead of the default pane deep-link. `"settings"` for update alerts;
+  /** Where a tap should land instead of the default pane deep-link. `"settings"` for update alerts,
+   *  `"home"` for a dcg approval (the cards live on the dashboard);
    *  absent = today's pane deep-link (so the agent-alert payload is unchanged). */
-  target?: "settings";
+  target?: "settings" | "home";
   renotify?: boolean;
 }
 
@@ -113,11 +118,18 @@ export class Push {
   async send(msg: PushMessage): Promise<void> {
     // The SW reads deep-link fields from `data`. `session` is omitted for the primary (absent on the
     // message), keeping that payload identical to the pre-multi-session shape.
-    const data: { paneId?: string; session?: string; target?: "settings" } = { paneId: msg.paneId };
+    const data: { paneId?: string; session?: string; target?: PushMessage["target"] } = {
+      paneId: msg.paneId,
+    };
     if (msg.session !== undefined) data.session = msg.session;
     if (msg.target !== undefined) data.target = msg.target;
     // Per-message collapse topic — update alerts must not share the herd slot (see UPDATE_SEND_OPTIONS).
-    const options = msg.type === "update" ? UPDATE_SEND_OPTIONS : SEND_OPTIONS;
+    const options =
+      msg.type === "update"
+        ? UPDATE_SEND_OPTIONS
+        : msg.type === "dcg"
+          ? DCG_SEND_OPTIONS
+          : SEND_OPTIONS;
     await this.broadcast(JSON.stringify({ ...msg, data }), options);
   }
 

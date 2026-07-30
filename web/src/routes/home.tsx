@@ -5,6 +5,7 @@ import { AppHeader, SettingsGear } from "@/components/app-header";
 import { SessionSwitcher } from "@/components/session-switcher";
 import { ReadOnlyBanner } from "@/components/read-only-banner";
 import { AgentList } from "@/components/agent-list";
+import { DcgApprovals } from "@/components/dcg-approvals";
 import { SpaceOverview } from "@/components/space-overview";
 import { NewSpaceSheet } from "@/components/new-space-sheet";
 import { StatusArea } from "@/components/status-area";
@@ -56,6 +57,9 @@ export function HomeRoute() {
         <ReadOnlyBanner device={data.device} />
 
         <main className="flex-1">
+          {/* A blocked destructive command outranks even "needs you": it is time-boxed and the guard
+              auto-denies when the countdown runs out. Renders nothing when nothing is blocked. */}
+          <DcgApprovals className="px-3 pt-3" />
           {/* Needs-you first — the most urgent triage, hoisted above the spaces overview. Renders
               nothing when no agent is blocked (emptyState off, so the placeholder shows only once
               below). */}

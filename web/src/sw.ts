@@ -110,6 +110,11 @@ self.addEventListener("notificationclick", (event: NotificationEvent) => {
     event.waitUntil(openPath("/settings"));
     return;
   }
+  // A dcg approval has no pane — its cards live on the dashboard.
+  if (data.target === "home") {
+    event.waitUntil(openPath("/"));
+    return;
+  }
   event.waitUntil(openPane(data.paneId, data.session));
 });
 
