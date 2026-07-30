@@ -20,6 +20,62 @@ function secondsLeft(pending: DcgPending, now: number): number {
   return Math.max(0, Math.round((new Date(pending.expiresAt).getTime() - now) / 1000));
 }
 
+/**
+ * Break a command chain into one display line per step, splitting only on `&&`, `||`, and `;` and
+ * keeping the operator with the line it ends.
+ *
+ * Quote-aware, and deliberately conservative about which operators count: splitting on a bare `|` or
+ * `&` too would tear `2>&1 | tail -3` into meaningless fragments, which misrepresents the very text
+ * the user is being asked to approve. Never rewrites the command — only inserts line breaks.
+ */
+function splitCommandForDisplay(command: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    const pair = command.slice(i, i + 2);
+    if (pair === "&&" || pair === "||") {
+      out.push((current + pair).trim());
+      current = "";
+      i++; // consumed both characters
+      continue;
+    }
+    if (ch === ";") {
+      out.push((current + ch).trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  const tail = current.trim();
+  if (tail) out.push(tail);
+  return out.length > 0 ? out : [command];
+}
+
+/** A labelled block: a small caps-ish label over its value. */
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 export function DcgApprovals({ className }: { className?: string }) {
   const { pending, answering, answer } = useDcgApprovals();
   const [now, setNow] = useState(() => Date.now());
@@ -83,19 +139,44 @@ function ApprovalCard({
         </span>
       </div>
 
-      {/* The command itself, verbatim. Rendered as a text node (never markup) — the same XSS
-          boundary the pane output holds to. */}
-      <div className="border-t border-border/60 px-4 py-3">
-        <pre className="overflow-x-auto font-mono text-xs whitespace-pre-wrap break-all">
-          {pending.command}
-        </pre>
-        {pending.cwd && (
-          <p className="mt-2 font-mono text-[11px] break-all text-muted-foreground">
-            in {pending.cwd}
-          </p>
-        )}
+      {/* Labelled sections rather than one blob: on a phone the decision is "what does this do, where,
+          and what exactly runs", and a wrapped slab of prose buries all three. Ordered accordingly,
+          with the guard's lower-value lines kept at the bottom rather than dropped. Every value is a
+          text node, never markup — the same XSS boundary the pane output holds to. */}
+      <div className="space-y-3 border-t border-border/60 px-4 py-3">
         {pending.reason && (
-          <p className="mt-2 text-xs text-muted-foreground">{pending.reason}</p>
+          <Field label="Why blocked">
+            <p className="text-xs">{pending.reason}</p>
+          </Field>
+        )}
+        {pending.cwd && (
+          <Field label="Working directory">
+            <p className="font-mono text-[11px] break-all">{pending.cwd}</p>
+          </Field>
+        )}
+        <Field label="Command">
+          {/* One step per line, so a long `&&` chain reads as the sequence it is. */}
+          {splitCommandForDisplay(pending.command).map((step, i) => (
+            <pre
+              key={i}
+              className="overflow-x-auto font-mono text-xs whitespace-pre-wrap break-all"
+            >
+              {step}
+            </pre>
+          ))}
+        </Field>
+        {pending.detail && (
+          <Field label="Detail">
+            <p className="text-[11px] text-muted-foreground">{pending.detail}</p>
+          </Field>
+        )}
+        {pending.extra?.map((x, i) => (
+          <p key={i} className="text-[11px] text-muted-foreground">
+            {x}
+          </p>
+        ))}
+        {pending.guidance && (
+          <p className="text-[11px] text-muted-foreground italic">{pending.guidance}</p>
         )}
       </div>
 

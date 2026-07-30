@@ -31,7 +31,14 @@ export interface DcgPending {
   ruleId: string;
   command: string;
   cwd?: string;
+  /** One line: why the guard considers this destructive. */
   reason?: string;
+  /** Which pattern matched, and where its documentation lives. */
+  detail?: string;
+  /** The guard's closing advice. */
+  guidance?: string;
+  /** Anything the publisher could not classify — carried so a future guard field is never dropped. */
+  extra?: string[];
   createdAt: string;
   expiresAt: string;
   host?: string;
