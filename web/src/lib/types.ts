@@ -24,11 +24,16 @@ export interface AgentView {
    */
   sessionName?: string;
   /**
-   * The agent's own session id, when it reported one. Its presence is what tells the UI a transcript
-   * may exist for this pane, so the History affordance shows without a speculative fetch. Opaque
-   * here — the bridge re-derives it server-side and never accepts one from the client.
+   * True when the agent named a session, so a journal may exist for this pane — what the History
+   * affordance keys off, without a speculative fetch.
+   *
+   * A FLAG, not the session itself: the bridge keeps the reference server-side and re-derives it from
+   * the pane id on every history request, because for some harnesses (pi) that reference is an
+   * absolute filesystem path. It never accepts one from the client. "May exist" is the honest
+   * reading — an agent can name a session whose log isn't readable, which the history endpoint
+   * answers with `available:false, reason:"no-log"`.
    */
-  agentSessionId?: string;
+  hasSession?: boolean;
   /**
    * Upper bound on the lines a pane read can return (Herdr's scrollback depth + viewport). The only
    * reliable "is there more scrollback" signal — `PaneReadResponse.truncated` is always false even
@@ -37,6 +42,25 @@ export interface AgentView {
    * bridges/Herdr, which reads as "unknown" (the button then falls back to hidden).
    */
   readableLines?: number;
+  /**
+   * The pane's tab label, denormalised bridge-side alongside `workspaceLabel`. Absent when it says
+   * nothing: Herdr names an unlabelled tab positionally ("1"), which in a single-tab space would
+   * render as `project · 1` (see `meaningfulTabLabel` in bridge/activity.ts). Render as text only,
+   * never markup — same XSS boundary as `paneLabel`.
+   */
+  tabLabel?: string;
+  /**
+   * Epoch ms of this agent's last status transition, as the bridge observed it. Absent on an older
+   * bridge — which is exactly why triage degrades cleanly; see `triage()`.
+   */
+  lastActiveAt?: number;
+  /**
+   * Epoch ms you last opened or drove this pane through Collie. Absent as above.
+   *
+   * There is no "seen" flag anywhere: a `done` agent is unseen precisely when
+   * `lastActiveAt > lastSeenAt`, so opening the pane clears it by construction.
+   */
+  lastSeenAt?: number;
 }
 
 /**

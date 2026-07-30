@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, normalize, sep } from "node:path";
+import type { ActivityLedger } from "./activity.ts";
 import type { AuditLog } from "./audit.ts";
 import type { Config } from "./config.ts";
 import { DcgApprovals, parseAnswerBody } from "./dcg-approvals.ts";
@@ -17,9 +18,13 @@ import { herdTagFor, type SessionRegistry } from "./sessions.ts";
 import type { Snooze } from "./snooze.ts";
 import type { UpdateMonitor } from "./update.ts";
 import type { StateEngine } from "./state-engine.ts";
-import { ClaudeTranscriptSource, TranscriptStore } from "./transcript.ts";
+import { adapterFor, buildJournalRegistry } from "./journal/registry.ts";
+import { TranscriptStore } from "./journal/store.ts";
+import type { JournalAdapter } from "./journal/types.ts";
+import { toPaneWire } from "./types.ts";
 import type {
   ActionResponse,
+  AgentView,
   BridgeConfig,
   CreateResponse,
   DeviceAuth,
@@ -97,6 +102,37 @@ const MAX_HISTORY_LIMIT = 5000;
 // (create) is an exact match on `/api/tab`, so it never collides with this `/api/tab/<id>/<action>`.
 const TAB_ACTION_ROUTE = /^\/api\/tab\/([^/]+)\/(rename|close)$/;
 
+/**
+ * Header the web app sets on its own pane reads, and the ONLY thing that lets a read mark a pane
+ * seen. See {@link marksPaneSeen} for why a header, of all things, is the check.
+ */
+export const SEEN_HEADER = "x-collie-seen";
+
+/**
+ * Whether this request proves it came from Collie's own page, and may therefore stamp the pane as
+ * seen (bridge/activity.ts).
+ *
+ * This exists because marking-seen made a **read-level GET mutate server state**, which it never did
+ * before. `checkAccess` deliberately does not demand an `Origin` on reads — browsers omit it on
+ * same-origin GETs, so demanding one would reject the real client — and that exemption was safe only
+ * while reads had no side effects. Without this check, a page the operator visits while on the
+ * tailnet could fire `<img src="https://collie…/api/pane/w1:p1">` at guessable pane ids and silently
+ * clear the "Ready · unseen" section: the response is opaque to the attacker, but the write lands,
+ * and the operator simply stops being told their agents finished.
+ *
+ * A custom request header is the check because a no-cors cross-site request **cannot set one** —
+ * doing so promotes it to a preflighted CORS request, and the bridge answers no preflight. Our own
+ * same-origin `fetch` sets it freely.
+ *
+ * Write actions (reply/keys/upload/close/rename) need no header: they already cleared
+ * `guard(…, "write")`, which requires an `Origin`. `history` is a read despite being an action
+ * segment, so it needs the header like any other read.
+ */
+export function marksPaneSeen(req: Request, action: string | undefined): boolean {
+  if (req.headers.get(SEEN_HEADER) !== null) return true;
+  return action !== undefined && action !== "history";
+}
+
 export function startServer(opts: {
   cfg: Config;
   registry: SessionRegistry;
@@ -105,14 +141,17 @@ export function startServer(opts: {
   notifyPrefs: NotifyPrefsStore;
   updateMonitor: UpdateMonitor;
   audit: AuditLog;
+  activity: ActivityLedger;
 }) {
-  const { cfg, registry, push, snooze, notifyPrefs, updateMonitor, audit } = opts;
-  // One transcript store for the process: it caches parsed session logs across requests, and the
-  // cache is keyed by absolute path, so sharing it across herdr sessions is correct (two sessions
-  // can front panes whose agents write into the same ~/.claude/projects root).
-  const transcripts = cfg.transcript
-    ? new TranscriptStore(new ClaudeTranscriptSource(cfg.transcriptRoot))
-    : null;
+  const { cfg, registry, push, snooze, notifyPrefs, updateMonitor, audit, activity } = opts;
+  // One journal registry + store for the process. The store's cache is keyed by absolute path, so
+  // sharing it across herdr sessions AND across harnesses is correct — two sessions can front panes
+  // whose agents write into the same root. Which harnesses have journals at all is decided in
+  // journal/registry.ts, never here.
+  const journals = cfg.transcript ? buildJournalRegistry(cfg.journalRoots) : null;
+  const transcripts = cfg.transcript ? new TranscriptStore() : null;
+  /** Does this agent have a journal at all — the snapshot's History-affordance gate. */
+  const hasJournal = (agent: string) => adapterFor(journals ?? {}, agent) !== undefined;
   // Blocks published by the local dcg guard. Independent of herdr: the guard writes files whether or
   // not this bridge is up, so nothing here needs to exist for the desk dialog to keep working.
   const dcgApprovals = new DcgApprovals();
@@ -146,6 +185,13 @@ export function startServer(opts: {
         if (!rt) return unknownSession();
         const { agents, shellPanes, workspaces, tabs, bridge } = rt.engine.current();
         const device = deviceAuth(req, cfg);
+        // Attach each pane's activity timestamps. Done here rather than in the state engine so the
+        // engine stays a pure Herdr-poller with no knowledge of the ledger — and so the two numbers
+        // are read at serialise time, i.e. as fresh as the request.
+        const withActivity = (p: AgentView): AgentView => {
+          const a = activity.get(rt.name, p.paneId);
+          return a ? { ...p, lastActiveAt: a.activeAt, lastSeenAt: a.seenAt } : p;
+        };
         // Tag every snapshot poll with the on-disk build id so an open client notices a live rebuild
         // between polls — the no-service-worker self-update path (web/src/lib/self-update.ts).
         return withBuildHeader(
@@ -153,8 +199,14 @@ export function startServer(opts: {
             bridge,
             // Only report device state when the feature is on, so an off deployment sends nothing new.
             ...(device.enforced ? { device } : {}),
-            agents,
-            shellPanes,
+            // The one place a pane leaves the bridge: the session ref is stripped to a presence flag
+            // here, so an agent-reported filesystem path never reaches a browser (see toPaneWire).
+            // The flag is computed against the registry, so a harness Herdr detects but Collie has no
+            // journal for doesn't advertise a History button that can only ever come back empty.
+            // withActivity runs FIRST: it returns an AgentView, which is what toPaneWire consumes,
+            // and the two timestamps then ride through its rest-spread onto the wire shape.
+            agents: agents.map((p) => toPaneWire(withActivity(p), hasJournal)),
+            shellPanes: shellPanes.map((p) => toPaneWire(withActivity(p), hasJournal)),
             workspaces,
             tabs,
             sessions: registry.list(),
@@ -204,18 +256,30 @@ export function startServer(opts: {
         // Reading a pane is allowed for any access-gated client; every action (reply/keys/upload/
         // close) types into or restructures a terminal, so it additionally needs an authorised device.
         // `history` is a READ despite being an action segment — it only ever reads a log off disk.
-        const denied = guard(req, cfg, action && action !== "history" ? "write" : "read");
+        const isRead = !action || action === "history";
+        const denied = guard(req, cfg, isRead ? "read" : "write");
         if (denied) return denied;
         const rt = registry.get(sessionName);
         if (!rt) return unknownSession();
         const { herdr, name: session } = rt;
+        // You are in this pane: reading it, replying, sending keys, browsing its history. That is
+        // the whole definition of "seen" (.adr/0003), and this is the one place every such request
+        // passes through. It cannot false-positive from background polling — the dashboard loader
+        // only ever fetches /api/snapshot; paneLoader is the sole reader of pane text — nor from a
+        // cross-site request forged at a guessed pane id (see marksPaneSeen).
+        //
+        // Gated on the request actually being ROUTED below. PANE_ROUTE constrains `action` to the
+        // known set, so the only way to reach here unrouted is a method mismatch (a GET at /reply, a
+        // POST at /history) — which 405s. Without this a malformed request still marked the pane seen.
+        const routed = isRead ? req.method === "GET" : req.method === "POST";
+        if (routed && marksPaneSeen(req, action)) activity.noteSeen(session, paneId);
         // Every action is a write; attribute it to the authorised device for the audit trail.
         // `history` is a read, so it gets no device attribution (nothing is written to attribute).
-        const device = action && action !== "history" ? deviceAuth(req, cfg).device : null;
+        const device = isRead ? null : deviceAuth(req, cfg).device;
 
         if (!action && req.method === "GET") return readPane(herdr, cfg, paneId, url, req);
         if (action === "history" && req.method === "GET")
-          return paneHistory(cfg, transcripts, rt.engine, paneId, url, req);
+          return paneHistory(cfg, journals, transcripts, rt.engine, paneId, url, req);
         if (action === "reply" && req.method === "POST") return replyPane(herdr, cfg, paneId, req, audit, device, session);
         if (action === "keys" && req.method === "POST") return keysPane(herdr, cfg, paneId, req, audit, device, session);
         if (action === "upload" && req.method === "POST") return uploadPane(cfg, paneId, req, audit, device, session);
@@ -495,14 +559,16 @@ export function historyParams(url: URL): { limit: number; before?: string } {
 }
 
 /**
- * GET /api/pane/:id/history — the conversation history a Claude pane's terminal cannot provide.
+ * GET /api/pane/:id/history — the conversation history the pane's terminal cannot provide.
  *
- * The session id is resolved HERE, from the live snapshot, keyed by pane id — the client never sends
+ * The session ref is resolved HERE, from the live snapshot, keyed by pane id — the client never sends
  * one. That is the whole safety story for a route that reads files: the only client-controlled inputs
- * are a pane id (a Map lookup) and an opaque cursor (an array lookup).
+ * are a pane id (a Map lookup) and an opaque cursor (an array lookup). Which harness knows how to
+ * read the log is the registry's decision, so this route stays agent-agnostic.
  */
 async function paneHistory(
   cfg: Config,
+  journals: Record<string, JournalAdapter> | null,
   transcripts: TranscriptStore | null,
   engine: StateEngine,
   paneId: string,
@@ -513,16 +579,20 @@ async function paneHistory(
   const unavailable = (reason: "disabled" | "no-session" | "no-log") =>
     json({ paneId, available: false, reason } satisfies PaneHistoryResponse, accept);
 
-  if (!cfg.transcript || transcripts === null) return unavailable("disabled");
+  if (!cfg.transcript || transcripts === null || journals === null) return unavailable("disabled");
 
   const { agents, shellPanes } = engine.current();
   const pane = [...agents, ...shellPanes].find((a) => a.paneId === paneId);
-  // No pane, or an agent that reported no id-kind session (a shell, or a harness that doesn't keep
-  // one): there is nothing to read, and that's an ordinary answer rather than an error.
-  if (!pane?.agentSessionId) return unavailable("no-session");
+  // No pane, or an agent that named no session (a shell, or a harness whose integration isn't
+  // installed): nothing to read, and that's an ordinary answer rather than an error.
+  if (!pane?.agentSession) return unavailable("no-session");
+  // An agent with no adapter has no journal. Same answer — the UI shouldn't distinguish "this
+  // harness isn't supported" from "this pane never started one"; both mean there's nothing to show.
+  const adapter = adapterFor(journals, pane.agent);
+  if (adapter === undefined) return unavailable("no-session");
 
   try {
-    const page = await transcripts.page(pane.agentSessionId, historyParams(url));
+    const page = await transcripts.page(adapter, pane.agentSession, historyParams(url));
     if (page === null) return unavailable("no-log");
     return json({ paneId, available: true, ...page } satisfies PaneHistoryResponse, accept);
   } catch (err) {
